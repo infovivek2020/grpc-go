@@ -22,10 +22,15 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
+	"math"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
+	"google.golang.org/grpc/compressor/gzip"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	pb "google.golang.org/grpc/examples/helloworld/helloworld"
 )
@@ -41,20 +46,54 @@ var (
 
 func main() {
 	flag.Parse()
-	// Set up a connection to the server.
-	conn, err := grpc.NewClient(*addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		log.Fatalf("did not connect: %v", err)
-	}
-	defer conn.Close()
-	c := pb.NewGreeterClient(conn)
+	// ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// defer cancel()
 
-	// Contact the server and print out its response.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	r, err := c.SayHello(ctx, &pb.HelloRequest{Name: *name})
+	// Establish a new gRPC client connection using grpc.NewClient
+	client, err := grpc.NewClient(
+		*addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()), // Insecure credentials for non-TLS connection
+		grpc.WithDefaultCallOptions(
+			grpc.UseCompressor(gzip.Name),            // Use gzip compressor
+			grpc.MaxCallRecvMsgSize(math.MaxInt64-1), // Set maximum receive message size
+		),
+		grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff: backoff.Config{
+				BaseDelay:  1.0 * time.Second, // Initial delay before retrying
+				Multiplier: 1.6,               // Backoff multiplier for successive retries
+				Jitter:     0.2,               // Jitter to randomize backoff
+				MaxDelay:   120 * time.Second, // Maximum delay between retries
+			},
+			MinConnectTimeout: 5 * time.Second, // Minimum time to spend on connection attempts
+		}),
+	)
 	if err != nil {
-		log.Fatalf("could not greet: %v", err)
+		log.Fatalf("failed to create gRPC client: %v", err)
 	}
-	log.Printf("Greeting: %s", r.GetMessage())
+	defer client.Close()
+
+	// Check the connection state and ensure it's ready
+	state := client.GetState()
+	log.Printf("Connection state: %v", state)
+
+	if state != connectivity.Ready {
+		log.Fatalf("Connection not ready: %v", state)
+	}
+
+	// Create a new instance of your service client
+	myServiceClient := pb.NewGreeterClient(client)
+
+	// Create a context with a timeout for your request
+	reqCtx, reqCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer reqCancel()
+
+	// Example RPC call to your service
+
+	response, err := myServiceClient.SayHello(reqCtx, &pb.HelloRequest{Name: *name})
+	if err != nil {
+		log.Fatalf("could not call YourMethod: %v", err)
+	}
+
+	// Handle the response
+	fmt.Printf("Response from server: %s\n", response.GetMessage())
 }
