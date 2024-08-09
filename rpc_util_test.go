@@ -21,6 +21,7 @@ package grpc
 import (
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"io"
 	"math"
 	"reflect"
@@ -265,4 +266,48 @@ func BenchmarkGZIPCompressor512KiB(b *testing.B) {
 
 func BenchmarkGZIPCompressor1MiB(b *testing.B) {
 	bmCompressor(b, 1024*1024, NewGZIPCompressor())
+}
+func TestCheckReceiveMessageOverflow(t *testing.T) {
+	tests := []struct {
+		name                  string
+		readBytes             int64
+		maxReceiveMessageSize int64
+		dcReader              io.Reader
+		expectedErr           error
+	}{
+		{
+			name:                  "No overflow",
+			readBytes:             5,
+			maxReceiveMessageSize: 10,
+			dcReader:              bytes.NewReader([]byte{}),
+			expectedErr:           nil,
+		},
+		{
+			name:                  "Overflow with additional data",
+			readBytes:             10,
+			maxReceiveMessageSize: 10,
+			dcReader:              bytes.NewReader([]byte{1}),
+			expectedErr:           errors.New("overflow: message larger than max size receivable by client (10 bytes)"),
+		},
+		{
+			name:                  "No overflow with EOF",
+			readBytes:             10,
+			maxReceiveMessageSize: 10,
+			dcReader:              bytes.NewReader([]byte{}),
+			expectedErr:           nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkReceiveMessageOverflow(tt.readBytes, tt.maxReceiveMessageSize, tt.dcReader)
+
+			// Check if the error matches the expected error.
+			if err != nil && tt.expectedErr == nil || err == nil && tt.expectedErr != nil {
+				t.Errorf("expected error: %v, got: %v", tt.expectedErr, err)
+			} else if err != nil && err.Error() != tt.expectedErr.Error() {
+				t.Errorf("expected error message: %v, got: %v", tt.expectedErr, err)
+			}
+		})
+	}
 }
