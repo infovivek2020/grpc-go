@@ -53,7 +53,7 @@ func main() {
 	const msg = "compress"
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	res, err := c.UnaryEcho(ctx, &pb.EchoRequest{Message: msg}, grpc.UseCompressor(gzip.Name), grpc.MaxCallRecvMsgSize(math.MaxInt64-1))
+	res, err := c.UnaryEcho(ctx, &pb.EchoRequest{Message: msg}, grpc.UseCompressor(gzip.Name), grpc.MaxCallRecvMsgSize(math.MaxInt64))
 	fmt.Printf("UnaryEcho call returned %q, %v\n", res.GetMessage(), err)
 	if err != nil || res.GetMessage() != msg {
 		log.Fatalf("Message=%q, err=%v; want Message=%q, err=<nil>", res.GetMessage(), err, msg)
