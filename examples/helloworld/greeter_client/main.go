@@ -1,6 +1,6 @@
 /*
  *
- * Copyright 2015 gRPC authors.
+ * Copyright 2018 gRPC authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,45 +16,47 @@
  *
  */
 
-// Package main implements a client for Greeter service.
+// Binary client is an example client.
 package main
 
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
+	"math"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	pb "google.golang.org/grpc/examples/helloworld/helloworld"
+	"google.golang.org/grpc/encoding/gzip" // Install the gzip compressor
+	pb "google.golang.org/grpc/examples/features/proto/echo"
 )
 
-const (
-	defaultName = "world"
-)
-
-var (
-	addr = flag.String("addr", "localhost:50051", "the address to connect to")
-	name = flag.String("name", defaultName, "Name to greet")
-)
+var addr = flag.String("addr", "localhost:50051", "the address to connect to")
 
 func main() {
 	flag.Parse()
+
 	// Set up a connection to the server.
 	conn, err := grpc.NewClient(*addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		log.Fatalf("did not connect: %v", err)
 	}
 	defer conn.Close()
-	c := pb.NewGreeterClient(conn)
 
-	// Contact the server and print out its response.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	c := pb.NewEchoClient(conn)
+
+	// Send the RPC compressed.  If all RPCs on a client should be sent this
+	// way, use the DialOption:
+	// grpc.WithDefaultCallOptions(grpc.UseCompressor(gzip.Name))
+	const msg = "compress"
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	r, err := c.SayHello(ctx, &pb.HelloRequest{Name: *name})
-	if err != nil {
-		log.Fatalf("could not greet: %v", err)
+	res, err := c.UnaryEcho(ctx, &pb.EchoRequest{Message: msg}, grpc.UseCompressor(gzip.Name), grpc.MaxCallRecvMsgSize(math.MaxInt64-1))
+	fmt.Printf("UnaryEcho call returned %q, %v\n", res.GetMessage(), err)
+	if err != nil || res.GetMessage() != msg {
+		log.Fatalf("Message=%q, err=%v; want Message=%q, err=<nil>", res.GetMessage(), err, msg)
 	}
-	log.Printf("Greeting: %s", r.GetMessage())
+
 }

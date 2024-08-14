@@ -1,6 +1,6 @@
 /*
  *
- * Copyright 2015 gRPC authors.
+ * Copyright 2018 gRPC authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
  *
  */
 
-// Package main implements a server for Greeter service.
+// Binary server is an example server.
 package main
 
 import (
@@ -27,34 +27,32 @@ import (
 	"net"
 
 	"google.golang.org/grpc"
-	pb "google.golang.org/grpc/examples/helloworld/helloworld"
+	_ "google.golang.org/grpc/encoding/gzip" // Install the gzip compressor
+
+	pb "google.golang.org/grpc/examples/features/proto/echo"
 )
 
-var (
-	port = flag.Int("port", 50051, "The server port")
-)
+var port = flag.Int("port", 50051, "the port to serve on")
 
-// server is used to implement helloworld.GreeterServer.
 type server struct {
-	pb.UnimplementedGreeterServer
+	pb.UnimplementedEchoServer
 }
 
-// SayHello implements helloworld.GreeterServer
-func (s *server) SayHello(ctx context.Context, in *pb.HelloRequest) (*pb.HelloReply, error) {
-	log.Printf("Received: %v", in.GetName())
-	return &pb.HelloReply{Message: "Hello " + in.GetName()}, nil
+func (s *server) UnaryEcho(ctx context.Context, in *pb.EchoRequest) (*pb.EchoResponse, error) {
+	fmt.Printf("UnaryEcho called with message %q\n", in.GetMessage())
+	return &pb.EchoResponse{Message: in.Message}, nil
 }
 
 func main() {
 	flag.Parse()
+
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
+	fmt.Printf("server listening at %v\n", lis.Addr())
+
 	s := grpc.NewServer()
-	pb.RegisterGreeterServer(s, &server{})
-	log.Printf("server listening at %v", lis.Addr())
-	if err := s.Serve(lis); err != nil {
-		log.Fatalf("failed to serve: %v", err)
-	}
+	pb.RegisterEchoServer(s, &server{})
+	s.Serve(lis)
 }
