@@ -19,6 +19,7 @@
 package grpc
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/binary"
@@ -870,43 +871,91 @@ func recvAndDecompress(p *parser, s *transport.Stream, dc Decompressor, maxRecei
 	return out, nil
 }
 
+// checkReceiveMessageOverflow checks if the number of bytes read from the stream exceeds
+// the maximum receive message size allowed by the client. If the `readBytes` equals
+// `maxReceiveMessageSize`, the function attempts to read one more byte from the `dcReader`
+// to detect if there's an overflow.
+func checkReceiveMessageOverflow(readBytes, maxReceiveMessageSize int64, dcReader io.Reader) error {
+	if readBytes == maxReceiveMessageSize {
+		b := make([]byte, 1)
+		if n, err := dcReader.Read(b); n > 0 || err != io.EOF {
+			return fmt.Errorf("overflow: message larger than max size receivable by client (%d bytes)", maxReceiveMessageSize)
+		}
+	}
+	return nil
+}
+
+// convert bytes to bufferslice
+func ConvertBytesToBufferSlice(data []byte, pool mem.BufferPool) mem.BufferSlice {
+	var bufferSlice mem.BufferSlice
+	dataPtr := &data
+	buffer := mem.NewBuffer(dataPtr, pool)
+	bufferSlice = append(bufferSlice, buffer)
+
+	return bufferSlice
+}
+
+// convert bufferSlice to bytes
+func ConvertBufferSliceToBytes(bs mem.BufferSlice) []byte {
+	var buffer bytes.Buffer
+	for _, buf := range bs {
+		buffer.Write(buf.ReadOnlyData())
+	}
+	return buffer.Bytes()
+}
+
 // Using compressor, decompress d, returning data and size.
 // Optionally, if data will be over maxReceiveMessageSize, just return the size.
 func decompress(compressor encoding.Compressor, d mem.BufferSlice, maxReceiveMessageSize int, pool mem.BufferPool) (mem.BufferSlice, int, error) {
-	dcReader, err := compressor.Decompress(d.Reader())
+	var sliceOfBytes []byte
+	sliceOfBytes = ConvertBufferSliceToBytes(d)
+	dcReader, err := compressor.Decompress(bytes.NewReader(sliceOfBytes))
 	if err != nil {
 		return nil, 0, err
 	}
+	if sizer, ok := compressor.(interface {
+		DecompressedSize(compressedBytes []byte) int
+	}); ok {
+		if size := sizer.DecompressedSize(sliceOfBytes); size >= 0 {
+			if size > maxReceiveMessageSize {
+				return nil, size, nil
+			}
+			// size is used as an estimate to size the buffer, but we
+			// will read more data if available.
+			// +MinRead so ReadFrom will not reallocate if size is correct.
+			//
+			// TODO: If we ensure that the buffer size is the same as the DecompressedSize,
+			// we can also utilize the recv buffer pool here.
 
-	// TODO: Can/should this still be preserved with the new BufferSlice API? Are
-	//  there any actual benefits to allocating a single large buffer instead of
-	//  multiple smaller ones?
-	//if sizer, ok := compressor.(interface {
-	//	DecompressedSize(compressedBytes []byte) int
-	//}); ok {
-	//	if size := sizer.DecompressedSize(d); size >= 0 {
-	//		if size > maxReceiveMessageSize {
-	//			return nil, size, nil
-	//		}
-	//		// size is used as an estimate to size the buffer, but we
-	//		// will read more data if available.
-	//		// +MinRead so ReadFrom will not reallocate if size is correct.
-	//		//
-	//		// TODO: If we ensure that the buffer size is the same as the DecompressedSize,
-	//		// we can also utilize the recv buffer pool here.
-	//		buf := bytes.NewBuffer(make([]byte, 0, size+bytes.MinRead))
-	//		bytesRead, err := buf.ReadFrom(io.LimitReader(dcReader, int64(maxReceiveMessageSize)+1))
-	//		return buf.Bytes(), int(bytesRead), err
-	//	}
-	//}
+			bufferSize := uint64(size) + bytes.MinRead
+			if bufferSize > math.MaxInt {
+				bufferSize = math.MaxInt
+			}
+			buf := bytes.NewBuffer(make([]byte, 0, int(bufferSize)))
 
-	var out mem.BufferSlice
-	_, err = io.Copy(mem.NewWriter(&out, pool), io.LimitReader(dcReader, int64(maxReceiveMessageSize)+1))
-	if err != nil {
-		out.Free()
-		return nil, 0, err
+			bytesRead, err := buf.ReadFrom(io.LimitReader(dcReader, int64(maxReceiveMessageSize)))
+			if err != nil {
+				return nil, int(bytesRead), err
+			}
+
+			if err = checkReceiveMessageOverflow(bytesRead, int64(maxReceiveMessageSize), dcReader); err != nil {
+				return nil, size + 1, err
+			}
+			data := buf.Bytes()
+			cbtbs := ConvertBytesToBufferSlice(data, pool)
+			return cbtbs, 0, nil
+		}
 	}
-	return out, out.Len(), nil
+	// Read from LimitReader & check for overflow
+	sliceOfBytes, err = io.ReadAll(io.LimitReader(dcReader, int64(maxReceiveMessageSize)))
+	if err != nil {
+		return nil, len(sliceOfBytes), err
+	}
+	if err = checkReceiveMessageOverflow(int64(len(d)), int64(maxReceiveMessageSize), dcReader); err != nil {
+		return nil, len(sliceOfBytes) + 1, err
+	}
+	bufferOfSlice := ConvertBytesToBufferSlice(sliceOfBytes, pool)
+	return bufferOfSlice, len(sliceOfBytes), err
 }
 
 // For the two compressor parameters, both should not be set, but if they are,

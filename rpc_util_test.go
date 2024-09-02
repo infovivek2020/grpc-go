@@ -21,11 +21,13 @@ package grpc
 import (
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"io"
 	"math"
 	"reflect"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc/codes"
 	protoenc "google.golang.org/grpc/encoding/proto"
 	"google.golang.org/grpc/internal/testutils"
@@ -289,4 +291,101 @@ func BenchmarkGZIPCompressor512KiB(b *testing.B) {
 
 func BenchmarkGZIPCompressor1MiB(b *testing.B) {
 	bmCompressor(b, 1024*1024, NewGZIPCompressor())
+}
+
+// gzipCompressor is an implementation of encoding.Compressor using gzip for compression and decompression.
+
+func (c *gzipCompressor) Compress(w io.Writer) (io.WriteCloser, error) {
+	return gzip.NewWriter(w), nil
+}
+
+func (c *gzipCompressor) Decompress(r io.Reader) (io.ReadCloser, error) {
+	return gzip.NewReader(r)
+}
+
+func TestDecompressor(t *testing.T) {
+	// Original data to be compressed
+	originalData := []byte("This is the data we want to compress and then decompress.")
+
+	// Initialize the gzip compressor
+	compressor := &gzipCompressor{}
+
+	// Compress the data
+	var compressedBuffer bytes.Buffer
+	writer, err := compressor.Compress(&compressedBuffer)
+	if err != nil {
+		t.Fatalf("Failed to create compressor: %v", err)
+	}
+	_, err = writer.Write(originalData)
+	if err != nil {
+		t.Fatalf("Failed to write data to compressor: %v", err)
+	}
+	writer.Close()
+
+	// Now we have compressed data in compressedBuffer
+	sliceOfBytes := compressedBuffer.Bytes()
+
+	// Simulate the decompress step
+	dcReader, err := compressor.Decompress(bytes.NewReader(sliceOfBytes))
+	if err != nil {
+		t.Fatalf("Failed to decompress data: %v", err)
+	}
+
+	// Read the decompressed data from the dcReader
+	decompressedData, err := io.ReadAll(dcReader)
+	if err != nil {
+		t.Fatalf("Failed to read decompressed data: %v", err)
+	}
+
+	// Assert the decompressed data matches the original data
+	assert.NoError(t, err)
+	assert.Equal(t, originalData, decompressedData)
+}
+func TestCheckReceiveMessageOverflow(t *testing.T) {
+	tests := []struct {
+		name                  string
+		readBytes             int64
+		maxReceiveMessageSize int64
+		dcReader              io.Reader
+		wantErr               error
+	}{
+		{
+			name:                  "No overflow",
+			readBytes:             5,
+			maxReceiveMessageSize: 10,
+			dcReader:              bytes.NewReader([]byte{}),
+			wantErr:               nil,
+		},
+		{
+			name:                  "Overflow with additional data",
+			readBytes:             10,
+			maxReceiveMessageSize: 10,
+			dcReader:              bytes.NewReader([]byte{1}),
+			wantErr:               errors.New("overflow: message larger than max size receivable by client (10 bytes)"),
+		},
+		{
+			name:                  "No overflow with EOF",
+			maxReceiveMessageSize: 10,
+			dcReader:              bytes.NewReader([]byte{}),
+			wantErr:               nil,
+		},
+		{
+			name:                  "Overflow condition with error handling",
+			readBytes:             15,
+			maxReceiveMessageSize: 15,
+			dcReader:              bytes.NewReader([]byte{1, 2, 3}),
+			wantErr:               errors.New("overflow: message larger than max size receivable by client (15 bytes)"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkReceiveMessageOverflow(tt.readBytes, tt.maxReceiveMessageSize, tt.dcReader)
+			if (err != nil) != (tt.wantErr != nil) {
+				t.Errorf("unexpected error state: got err=%v, want err=%v", err, tt.wantErr)
+			} else if err != nil && err.Error() != tt.wantErr.Error() {
+				t.Errorf("unexpected error message: got err=%v, want err=%v", err, tt.wantErr)
+			}
+
+		})
+	}
 }
