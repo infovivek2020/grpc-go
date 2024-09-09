@@ -38,7 +38,9 @@ func Test(t *testing.T) {
 // TestPanic tests that registering two metrics with the same name across any
 // type of metric triggers a panic.
 func (s) TestPanic(t *testing.T) {
-	snapshotMetricsRegistryForTesting(t)
+	cleanup := snapshotMetricsRegistryForTesting()
+	defer cleanup()
+
 	want := "metric simple counter already registered"
 	defer func() {
 		if r := recover(); !strings.Contains(fmt.Sprint(r), want) {
@@ -64,7 +66,9 @@ func (s) TestPanic(t *testing.T) {
 // this tests the interactions between the metrics recorder and the metrics
 // registry.
 func (s) TestMetricRegistry(t *testing.T) {
-	snapshotMetricsRegistryForTesting(t)
+	cleanup := snapshotMetricsRegistryForTesting()
+	defer cleanup()
+
 	intCountHandle1 := RegisterInt64Count(MetricDescriptor{
 		Name:           "simple counter",
 		Description:    "sum of all emissions from tests",
@@ -112,27 +116,27 @@ func (s) TestMetricRegistry(t *testing.T) {
 	// The Metric Descriptor in the handle should be able to identify the metric
 	// information. This is the key passed to metrics recorder to identify
 	// metric.
-	if got := fmr.intValues[(*MetricDescriptor)(intCountHandle1)]; got != 1 {
+	if got := fmr.intValues[intCountHandle1.Descriptor()]; got != 1 {
 		t.Fatalf("fmr.intValues[intCountHandle1.MetricDescriptor] got %v, want: %v", got, 1)
 	}
 
 	floatCountHandle1.Record(fmr, 1.2, []string{"some label value", "some optional label value"}...)
-	if got := fmr.floatValues[(*MetricDescriptor)(floatCountHandle1)]; got != 1.2 {
+	if got := fmr.floatValues[floatCountHandle1.Descriptor()]; got != 1.2 {
 		t.Fatalf("fmr.floatValues[floatCountHandle1.MetricDescriptor] got %v, want: %v", got, 1.2)
 	}
 
 	intHistoHandle1.Record(fmr, 3, []string{"some label value", "some optional label value"}...)
-	if got := fmr.intValues[(*MetricDescriptor)(intHistoHandle1)]; got != 3 {
+	if got := fmr.intValues[intHistoHandle1.Descriptor()]; got != 3 {
 		t.Fatalf("fmr.intValues[intHistoHandle1.MetricDescriptor] got %v, want: %v", got, 3)
 	}
 
 	floatHistoHandle1.Record(fmr, 4.3, []string{"some label value", "some optional label value"}...)
-	if got := fmr.floatValues[(*MetricDescriptor)(floatHistoHandle1)]; got != 4.3 {
+	if got := fmr.floatValues[floatHistoHandle1.Descriptor()]; got != 4.3 {
 		t.Fatalf("fmr.floatValues[floatHistoHandle1.MetricDescriptor] got %v, want: %v", got, 4.3)
 	}
 
 	intGaugeHandle1.Record(fmr, 7, []string{"some label value", "some optional label value"}...)
-	if got := fmr.intValues[(*MetricDescriptor)(intGaugeHandle1)]; got != 7 {
+	if got := fmr.intValues[intGaugeHandle1.Descriptor()]; got != 7 {
 		t.Fatalf("fmr.intValues[intGaugeHandle1.MetricDescriptor] got %v, want: %v", got, 7)
 	}
 }
@@ -141,7 +145,9 @@ func (s) TestMetricRegistry(t *testing.T) {
 // metric registry. A component (simulated by test) should be able to record on
 // the different registered int count metrics.
 func TestNumerousIntCounts(t *testing.T) {
-	snapshotMetricsRegistryForTesting(t)
+	cleanup := snapshotMetricsRegistryForTesting()
+	defer cleanup()
+
 	intCountHandle1 := RegisterInt64Count(MetricDescriptor{
 		Name:           "int counter",
 		Description:    "sum of all emissions from tests",
@@ -170,28 +176,28 @@ func TestNumerousIntCounts(t *testing.T) {
 	fmr := newFakeMetricsRecorder(t)
 
 	intCountHandle1.Record(fmr, 1, []string{"some label value", "some optional label value"}...)
-	got := []int64{fmr.intValues[(*MetricDescriptor)(intCountHandle1)], fmr.intValues[(*MetricDescriptor)(intCountHandle2)], fmr.intValues[(*MetricDescriptor)(intCountHandle3)]}
+	got := []int64{fmr.intValues[intCountHandle1.Descriptor()], fmr.intValues[intCountHandle2.Descriptor()], fmr.intValues[intCountHandle3.Descriptor()]}
 	want := []int64{1, 0, 0}
 	if diff := cmp.Diff(got, want); diff != "" {
 		t.Fatalf("fmr.intValues (-got, +want): %v", diff)
 	}
 
 	intCountHandle2.Record(fmr, 1, []string{"some label value", "some optional label value"}...)
-	got = []int64{fmr.intValues[(*MetricDescriptor)(intCountHandle1)], fmr.intValues[(*MetricDescriptor)(intCountHandle2)], fmr.intValues[(*MetricDescriptor)(intCountHandle3)]}
+	got = []int64{fmr.intValues[intCountHandle1.Descriptor()], fmr.intValues[intCountHandle2.Descriptor()], fmr.intValues[intCountHandle3.Descriptor()]}
 	want = []int64{1, 1, 0}
 	if diff := cmp.Diff(got, want); diff != "" {
 		t.Fatalf("fmr.intValues (-got, +want): %v", diff)
 	}
 
 	intCountHandle3.Record(fmr, 1, []string{"some label value", "some optional label value"}...)
-	got = []int64{fmr.intValues[(*MetricDescriptor)(intCountHandle1)], fmr.intValues[(*MetricDescriptor)(intCountHandle2)], fmr.intValues[(*MetricDescriptor)(intCountHandle3)]}
+	got = []int64{fmr.intValues[intCountHandle1.Descriptor()], fmr.intValues[intCountHandle2.Descriptor()], fmr.intValues[intCountHandle3.Descriptor()]}
 	want = []int64{1, 1, 1}
 	if diff := cmp.Diff(got, want); diff != "" {
 		t.Fatalf("fmr.intValues (-got, +want): %v", diff)
 	}
 
 	intCountHandle3.Record(fmr, 1, []string{"some label value", "some optional label value"}...)
-	got = []int64{fmr.intValues[(*MetricDescriptor)(intCountHandle1)], fmr.intValues[(*MetricDescriptor)(intCountHandle2)], fmr.intValues[(*MetricDescriptor)(intCountHandle3)]}
+	got = []int64{fmr.intValues[intCountHandle1.Descriptor()], fmr.intValues[intCountHandle2.Descriptor()], fmr.intValues[intCountHandle3.Descriptor()]}
 	want = []int64{1, 1, 2}
 	if diff := cmp.Diff(got, want); diff != "" {
 		t.Fatalf("fmr.intValues (-got, +want): %v", diff)
@@ -236,26 +242,26 @@ func verifyLabels(t *testing.T, labelsWant []string, optionalLabelsWant []string
 }
 
 func (r *fakeMetricsRecorder) RecordInt64Count(handle *Int64CountHandle, incr int64, labels ...string) {
-	verifyLabels(r.t, (*MetricDescriptor)(handle).Labels, (*MetricDescriptor)(handle).OptionalLabels, labels)
-	r.intValues[(*MetricDescriptor)(handle)] += incr
+	verifyLabels(r.t, handle.Descriptor().Labels, handle.Descriptor().OptionalLabels, labels)
+	r.intValues[handle.Descriptor()] += incr
 }
 
 func (r *fakeMetricsRecorder) RecordFloat64Count(handle *Float64CountHandle, incr float64, labels ...string) {
-	verifyLabels(r.t, (*MetricDescriptor)(handle).Labels, (*MetricDescriptor)(handle).OptionalLabels, labels)
-	r.floatValues[(*MetricDescriptor)(handle)] += incr
+	verifyLabels(r.t, handle.Descriptor().Labels, handle.Descriptor().OptionalLabels, labels)
+	r.floatValues[handle.Descriptor()] += incr
 }
 
 func (r *fakeMetricsRecorder) RecordInt64Histo(handle *Int64HistoHandle, incr int64, labels ...string) {
-	verifyLabels(r.t, (*MetricDescriptor)(handle).Labels, (*MetricDescriptor)(handle).OptionalLabels, labels)
-	r.intValues[(*MetricDescriptor)(handle)] += incr
+	verifyLabels(r.t, handle.Descriptor().Labels, handle.Descriptor().OptionalLabels, labels)
+	r.intValues[handle.Descriptor()] += incr
 }
 
 func (r *fakeMetricsRecorder) RecordFloat64Histo(handle *Float64HistoHandle, incr float64, labels ...string) {
-	verifyLabels(r.t, (*MetricDescriptor)(handle).Labels, (*MetricDescriptor)(handle).OptionalLabels, labels)
-	r.floatValues[(*MetricDescriptor)(handle)] += incr
+	verifyLabels(r.t, handle.Descriptor().Labels, handle.Descriptor().OptionalLabels, labels)
+	r.floatValues[handle.Descriptor()] += incr
 }
 
 func (r *fakeMetricsRecorder) RecordInt64Gauge(handle *Int64GaugeHandle, incr int64, labels ...string) {
-	verifyLabels(r.t, (*MetricDescriptor)(handle).Labels, (*MetricDescriptor)(handle).OptionalLabels, labels)
-	r.intValues[(*MetricDescriptor)(handle)] += incr
+	verifyLabels(r.t, handle.Descriptor().Labels, handle.Descriptor().OptionalLabels, labels)
+	r.intValues[handle.Descriptor()] += incr
 }

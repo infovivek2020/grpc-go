@@ -134,7 +134,7 @@ func (s) TestCSMPluginOptionUnary(t *testing.T) {
 	}{
 		{
 			name: "normal-flow",
-			unaryCallFunc: func(ctx context.Context, in *testpb.SimpleRequest) (*testpb.SimpleResponse, error) {
+			unaryCallFunc: func(_ context.Context, in *testpb.SimpleRequest) (*testpb.SimpleResponse, error) {
 				return &testpb.SimpleResponse{Payload: &testpb.Payload{
 					Body: make([]byte, len(in.GetPayload().GetBody())),
 				}}, nil
@@ -146,7 +146,7 @@ func (s) TestCSMPluginOptionUnary(t *testing.T) {
 		},
 		{
 			name: "trailers-only",
-			unaryCallFunc: func(ctx context.Context, in *testpb.SimpleRequest) (*testpb.SimpleResponse, error) {
+			unaryCallFunc: func(context.Context, *testpb.SimpleRequest) (*testpb.SimpleResponse, error) {
 				return nil, errors.New("some error") // return an error and no message - this triggers trailers only - no messages or headers sent
 			},
 			opts: itestutils.MetricDataOptions{
@@ -184,7 +184,7 @@ func (s) TestCSMPluginOptionUnary(t *testing.T) {
 		},
 		{
 			name: "send-msg",
-			unaryCallFunc: func(ctx context.Context, in *testpb.SimpleRequest) (*testpb.SimpleResponse, error) {
+			unaryCallFunc: func(_ context.Context, in *testpb.SimpleRequest) (*testpb.SimpleResponse, error) {
 				return &testpb.SimpleResponse{Payload: &testpb.Payload{
 					Body: make([]byte, len(in.GetPayload().GetBody())),
 				}}, nil
@@ -425,9 +425,12 @@ func (s) TestCSMPluginOptionStreaming(t *testing.T) {
 func unaryInterceptorAttachXDSLabels(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 	ctx = istats.SetLabels(ctx, &istats.Labels{
 		TelemetryLabels: map[string]string{
-			// mock what the cluster impl would write here ("csm." xDS Labels)
+			// mock what the cluster impl would write here ("csm." xDS Labels
+			// and locality label)
 			"csm.service_name":           "service_name_val",
 			"csm.service_namespace_name": "service_namespace_val",
+
+			"grpc.lb.locality": "grpc.lb.locality_val",
 		},
 	})
 
@@ -441,15 +444,16 @@ func unaryInterceptorAttachXDSLabels(ctx context.Context, method string, req, re
 // Optional Labels turned on. It then configures an interceptor to attach
 // labels, representing the cluster_impl picker. It then makes a unary RPC, and
 // expects xDS Labels labels to be attached to emitted relevant metrics. Full
-// xDS System alongside OpenTelemetry will be tested with interop. (there is
-// a test for xDS -> Stats handler and this tests -> OTel -> emission).
+// xDS System alongside OpenTelemetry will be tested with interop. (there is a
+// test for xDS -> Stats handler and this tests -> OTel -> emission). It also
+// tests the optional per call locality label in the same manner.
 func (s) TestXDSLabels(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTestTimeout)
 	defer cancel()
 	reader := metric.NewManualReader()
 	provider := metric.NewMeterProvider(metric.WithReader(reader))
 	ss := &stubserver.StubServer{
-		UnaryCallF: func(ctx context.Context, in *testpb.SimpleRequest) (*testpb.SimpleResponse, error) {
+		UnaryCallF: func(_ context.Context, in *testpb.SimpleRequest) (*testpb.SimpleResponse, error) {
 			return &testpb.SimpleResponse{Payload: &testpb.Payload{
 				Body: make([]byte, len(in.GetPayload().GetBody())),
 			}}, nil
@@ -457,11 +461,11 @@ func (s) TestXDSLabels(t *testing.T) {
 	}
 
 	po := newPluginOption(ctx)
-	dopts := []grpc.DialOption{dialOptionWithCSMPluginOption(opentelemetry.Options{
+	dopts := []grpc.DialOption{dialOptionSetCSM(opentelemetry.Options{
 		MetricsOptions: opentelemetry.MetricsOptions{
 			MeterProvider:  provider,
 			Metrics:        opentelemetry.DefaultMetrics(),
-			OptionalLabels: []string{"csm.service_name", "csm.service_namespace_name"},
+			OptionalLabels: []string{"csm.service_name", "csm.service_namespace_name", "grpc.lb.locality"},
 		},
 	}, po), grpc.WithUnaryInterceptor(unaryInterceptorAttachXDSLabels)}
 	if err := ss.Start(nil, dopts...); err != nil {
@@ -489,6 +493,7 @@ func (s) TestXDSLabels(t *testing.T) {
 
 	serviceNameAttr := attribute.String("csm.service_name", "service_name_val")
 	serviceNamespaceAttr := attribute.String("csm.service_namespace_name", "service_namespace_val")
+	localityAttr := attribute.String("grpc.lb.locality", "grpc.lb.locality_val")
 	meshIDAttr := attribute.String("csm.mesh_id", "unknown")
 	workloadCanonicalServiceAttr := attribute.String("csm.workload_canonical_service", "unknown")
 	remoteWorkloadTypeAttr := attribute.String("csm.remote_workload_type", "unknown")
@@ -500,6 +505,7 @@ func (s) TestXDSLabels(t *testing.T) {
 		unaryStatusAttr,
 		serviceNameAttr,
 		serviceNamespaceAttr,
+		localityAttr,
 		meshIDAttr,
 		workloadCanonicalServiceAttr,
 		remoteWorkloadTypeAttr,
@@ -601,7 +607,7 @@ func (s) TestXDSLabels(t *testing.T) {
 // TestObservability tests that Observability global function compiles and runs
 // without error. The actual functionality of this function will be verified in
 // interop tests.
-func (s) TestObservability(t *testing.T) {
+func (s) TestObservability(*testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTestTimeout)
 	defer cancel()
 
