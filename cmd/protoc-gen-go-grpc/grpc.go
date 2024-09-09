@@ -73,20 +73,23 @@ func (serviceGenerateHelper) generateClientStruct(g *protogen.GeneratedFile, cli
 	g.P()
 }
 
-func (serviceGenerateHelper) generateNewClientDefinitions(g *protogen.GeneratedFile, service *protogen.Service, clientName string) {
+func (serviceGenerateHelper) generateNewClientDefinitions(g *protogen.GeneratedFile, _ *protogen.Service, clientName string) {
 	g.P("return &", unexport(clientName), "{cc}")
 }
 
-func (serviceGenerateHelper) generateUnimplementedServerType(gen *protogen.Plugin, file *protogen.File, g *protogen.GeneratedFile, service *protogen.Service) {
+func (serviceGenerateHelper) generateUnimplementedServerType(_ *protogen.Plugin, _ *protogen.File, g *protogen.GeneratedFile, service *protogen.Service) {
 	serverType := service.GoName + "Server"
 	mustOrShould := "must"
 	if !*requireUnimplemented {
 		mustOrShould = "should"
 	}
 	// Server Unimplemented struct for forward compatibility.
-	g.P("// Unimplemented", serverType, " ", mustOrShould, " be embedded to have forward compatible implementations.")
-	g.P("type Unimplemented", serverType, " struct {")
-	g.P("}")
+	g.P("// Unimplemented", serverType, " ", mustOrShould, " be embedded to have")
+	g.P("// forward compatible implementations.")
+	g.P("//")
+	g.P("// NOTE: this should be embedded by value instead of pointer to avoid a nil")
+	g.P("// pointer dereference when methods are called.")
+	g.P("type Unimplemented", serverType, " struct {}")
 	g.P()
 	for _, method := range service.Methods {
 		nilArg := ""
@@ -100,6 +103,7 @@ func (serviceGenerateHelper) generateUnimplementedServerType(gen *protogen.Plugi
 	if *requireUnimplemented {
 		g.P("func (Unimplemented", serverType, ") mustEmbedUnimplemented", serverType, "() {}")
 	}
+	g.P("func (Unimplemented", serverType, ") testEmbeddedByValue() {}")
 	g.P()
 }
 
@@ -115,7 +119,7 @@ func (serviceGenerateHelper) generateServerFunctions(gen *protogen.Plugin, file 
 	genServiceDesc(file, g, serviceDescVar, serverType, service, handlerNames)
 }
 
-func (serviceGenerateHelper) formatHandlerFuncName(service *protogen.Service, hname string) string {
+func (serviceGenerateHelper) formatHandlerFuncName(_ *protogen.Service, hname string) string {
 	return hname
 }
 
@@ -306,6 +310,13 @@ func genService(gen *protogen.Plugin, file *protogen.File, g *protogen.Generated
 	}
 	serviceDescVar := service.GoName + "_ServiceDesc"
 	g.P("func Register", service.GoName, "Server(s ", grpcPackage.Ident("ServiceRegistrar"), ", srv ", serverType, ") {")
+	g.P("// If the following call panics, it indicates Unimplemented", serverType, " was")
+	g.P("// embedded by pointer and is nil.  This will cause panics if an")
+	g.P("// unimplemented method is ever invoked, so we test this at initialization")
+	g.P("// time to prevent it from happening at runtime later due to I/O.")
+	g.P("if t, ok := srv.(interface { testEmbeddedByValue() }); ok {")
+	g.P("t.testEmbeddedByValue()")
+	g.P("}")
 	g.P("s.RegisterService(&", serviceDescVar, `, srv)`)
 	g.P("}")
 	g.P()
@@ -336,14 +347,14 @@ func clientStreamInterface(g *protogen.GeneratedFile, method *protogen.Method) s
 	typeParam := g.QualifiedGoIdent(method.Input.GoIdent) + ", " + g.QualifiedGoIdent(method.Output.GoIdent)
 	if method.Desc.IsStreamingClient() && method.Desc.IsStreamingServer() {
 		return g.QualifiedGoIdent(grpcPackage.Ident("BidiStreamingClient")) + "[" + typeParam + "]"
-	} else if method.Desc.IsStreamingClient() {
-		return g.QualifiedGoIdent(grpcPackage.Ident("ClientStreamingClient")) + "[" + typeParam + "]"
-	} else { // i.e. if method.Desc.IsStreamingServer()
-		return g.QualifiedGoIdent(grpcPackage.Ident("ServerStreamingClient")) + "[" + g.QualifiedGoIdent(method.Output.GoIdent) + "]"
 	}
+	if method.Desc.IsStreamingClient() {
+		return g.QualifiedGoIdent(grpcPackage.Ident("ClientStreamingClient")) + "[" + typeParam + "]"
+	}
+	return g.QualifiedGoIdent(grpcPackage.Ident("ServerStreamingClient")) + "[" + g.QualifiedGoIdent(method.Output.GoIdent) + "]"
 }
 
-func genClientMethod(gen *protogen.Plugin, file *protogen.File, g *protogen.GeneratedFile, method *protogen.Method, index int) {
+func genClientMethod(_ *protogen.Plugin, _ *protogen.File, g *protogen.GeneratedFile, method *protogen.Method, index int) {
 	service := method.Parent
 	fmSymbol := helper.formatFullMethodSymbol(service, method)
 
@@ -503,14 +514,15 @@ func serverStreamInterface(g *protogen.GeneratedFile, method *protogen.Method) s
 	typeParam := g.QualifiedGoIdent(method.Input.GoIdent) + ", " + g.QualifiedGoIdent(method.Output.GoIdent)
 	if method.Desc.IsStreamingClient() && method.Desc.IsStreamingServer() {
 		return g.QualifiedGoIdent(grpcPackage.Ident("BidiStreamingServer")) + "[" + typeParam + "]"
-	} else if method.Desc.IsStreamingClient() {
-		return g.QualifiedGoIdent(grpcPackage.Ident("ClientStreamingServer")) + "[" + typeParam + "]"
-	} else { // i.e. if method.Desc.IsStreamingServer()
-		return g.QualifiedGoIdent(grpcPackage.Ident("ServerStreamingServer")) + "[" + g.QualifiedGoIdent(method.Output.GoIdent) + "]"
 	}
+	if method.Desc.IsStreamingClient() {
+		return g.QualifiedGoIdent(grpcPackage.Ident("ClientStreamingServer")) + "[" + typeParam + "]"
+	}
+
+	return g.QualifiedGoIdent(grpcPackage.Ident("ServerStreamingServer")) + "[" + g.QualifiedGoIdent(method.Output.GoIdent) + "]"
 }
 
-func genServerMethod(gen *protogen.Plugin, file *protogen.File, g *protogen.GeneratedFile, method *protogen.Method, hnameFuncNameFormatter func(string) string) string {
+func genServerMethod(_ *protogen.Plugin, _ *protogen.File, g *protogen.GeneratedFile, method *protogen.Method, hnameFuncNameFormatter func(string) string) string {
 	service := method.Parent
 	hname := fmt.Sprintf("_%s_%s_Handler", service.GoName, method.GoName)
 

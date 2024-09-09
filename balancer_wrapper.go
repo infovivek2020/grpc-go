@@ -82,6 +82,7 @@ func newCCBalancerWrapper(cc *ClientConn) *ccBalancerWrapper {
 			CustomUserAgent: cc.dopts.copts.UserAgent,
 			ChannelzParent:  cc.channelz,
 			Target:          cc.parsedTarget,
+			MetricsRecorder: cc.metricsRecorderList,
 		},
 		serializer:       grpcsync.NewCallbackSerializer(ctx),
 		serializerCancel: cancel,
@@ -95,7 +96,7 @@ func newCCBalancerWrapper(cc *ClientConn) *ccBalancerWrapper {
 // it is safe to call into the balancer here.
 func (ccb *ccBalancerWrapper) updateClientConnState(ccs *balancer.ClientConnState) error {
 	errCh := make(chan error)
-	ok := ccb.serializer.Schedule(func(ctx context.Context) {
+	uccs := func(ctx context.Context) {
 		defer close(errCh)
 		if ctx.Err() != nil || ccb.balancer == nil {
 			return
@@ -110,17 +111,23 @@ func (ccb *ccBalancerWrapper) updateClientConnState(ccs *balancer.ClientConnStat
 			logger.Infof("error from balancer.UpdateClientConnState: %v", err)
 		}
 		errCh <- err
-	})
-	if !ok {
-		return nil
 	}
+	onFailure := func() { close(errCh) }
+
+	// UpdateClientConnState can race with Close, and when the latter wins, the
+	// serializer is closed, and the attempt to schedule the callback will fail.
+	// It is acceptable to ignore this failure. But since we want to handle the
+	// state update in a blocking fashion (when we successfully schedule the
+	// callback), we have to use the ScheduleOr method and not the MaybeSchedule
+	// method on the serializer.
+	ccb.serializer.ScheduleOr(uccs, onFailure)
 	return <-errCh
 }
 
 // resolverError is invoked by grpc to push a resolver error to the underlying
 // balancer.  The call to the balancer is executed from the serializer.
 func (ccb *ccBalancerWrapper) resolverError(err error) {
-	ccb.serializer.Schedule(func(ctx context.Context) {
+	ccb.serializer.TrySchedule(func(ctx context.Context) {
 		if ctx.Err() != nil || ccb.balancer == nil {
 			return
 		}
@@ -136,7 +143,7 @@ func (ccb *ccBalancerWrapper) close() {
 	ccb.closed = true
 	ccb.mu.Unlock()
 	channelz.Info(logger, ccb.cc.channelz, "ccBalancerWrapper: closing")
-	ccb.serializer.Schedule(func(context.Context) {
+	ccb.serializer.TrySchedule(func(context.Context) {
 		if ccb.balancer == nil {
 			return
 		}
@@ -148,7 +155,7 @@ func (ccb *ccBalancerWrapper) close() {
 
 // exitIdle invokes the balancer's exitIdle method in the serializer.
 func (ccb *ccBalancerWrapper) exitIdle() {
-	ccb.serializer.Schedule(func(ctx context.Context) {
+	ccb.serializer.TrySchedule(func(ctx context.Context) {
 		if ctx.Err() != nil || ccb.balancer == nil {
 			return
 		}
@@ -185,7 +192,7 @@ func (ccb *ccBalancerWrapper) NewSubConn(addrs []resolver.Address, opts balancer
 	return acbw, nil
 }
 
-func (ccb *ccBalancerWrapper) RemoveSubConn(sc balancer.SubConn) {
+func (ccb *ccBalancerWrapper) RemoveSubConn(balancer.SubConn) {
 	// The graceful switch balancer will never call this.
 	logger.Errorf("ccb RemoveSubConn(%v) called unexpectedly, sc")
 }
@@ -256,7 +263,7 @@ type acBalancerWrapper struct {
 // updateState is invoked by grpc to push a subConn state update to the
 // underlying balancer.
 func (acbw *acBalancerWrapper) updateState(s connectivity.State, curAddr resolver.Address, err error) {
-	acbw.ccb.serializer.Schedule(func(ctx context.Context) {
+	acbw.ccb.serializer.TrySchedule(func(ctx context.Context) {
 		if ctx.Err() != nil || acbw.ccb.balancer == nil {
 			return
 		}
@@ -268,6 +275,16 @@ func (acbw *acBalancerWrapper) updateState(s connectivity.State, curAddr resolve
 			setConnectedAddress(&scs, curAddr)
 		}
 		acbw.stateListener(scs)
+		acbw.ac.mu.Lock()
+		defer acbw.ac.mu.Unlock()
+		if s == connectivity.Ready {
+			// When changing states to READY, reset stateReadyChan.  Wait until
+			// after we notify the LB policy's listener(s) in order to prevent
+			// ac.getTransport() from unblocking before the LB policy starts
+			// tracking the subchannel as READY.
+			close(acbw.ac.stateReadyChan)
+			acbw.ac.stateReadyChan = make(chan struct{})
+		}
 	})
 }
 
@@ -325,8 +342,8 @@ func (acbw *acBalancerWrapper) GetOrBuildProducer(pb balancer.ProducerBuilder) (
 	pData := acbw.producers[pb]
 	if pData == nil {
 		// Not found; create a new one and add it to the producers map.
-		p, close := pb.Build(acbw)
-		pData = &refCountedProducer{producer: p, close: close}
+		p, closeFn := pb.Build(acbw)
+		pData = &refCountedProducer{producer: p, close: closeFn}
 		acbw.producers[pb] = pData
 	}
 	// Account for this new reference.

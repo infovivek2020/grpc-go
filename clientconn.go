@@ -40,6 +40,7 @@ import (
 	"google.golang.org/grpc/internal/grpcsync"
 	"google.golang.org/grpc/internal/idle"
 	iresolver "google.golang.org/grpc/internal/resolver"
+	"google.golang.org/grpc/internal/stats"
 	"google.golang.org/grpc/internal/transport"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/resolver"
@@ -195,8 +196,11 @@ func NewClient(target string, opts ...DialOption) (conn *ClientConn, err error) 
 	cc.csMgr = newConnectivityStateManager(cc.ctx, cc.channelz)
 	cc.pickerWrapper = newPickerWrapper(cc.dopts.copts.StatsHandlers)
 
+	cc.metricsRecorderList = stats.NewMetricsRecorderList(cc.dopts.copts.StatsHandlers)
+
 	cc.initIdleStateLocked() // Safe to call without the lock, since nothing else has a reference to cc.
 	cc.idlenessMgr = idle.NewManager((*idler)(cc), cc.dopts.idleTimeout)
+
 	return cc, nil
 }
 
@@ -591,13 +595,14 @@ type ClientConn struct {
 	cancel context.CancelFunc // Cancelled on close.
 
 	// The following are initialized at dial time, and are read-only after that.
-	target          string            // User's dial target.
-	parsedTarget    resolver.Target   // See initParsedTargetAndResolverBuilder().
-	authority       string            // See initAuthority().
-	dopts           dialOptions       // Default and user specified dial options.
-	channelz        *channelz.Channel // Channelz object.
-	resolverBuilder resolver.Builder  // See initParsedTargetAndResolverBuilder().
-	idlenessMgr     *idle.Manager
+	target              string            // User's dial target.
+	parsedTarget        resolver.Target   // See initParsedTargetAndResolverBuilder().
+	authority           string            // See initAuthority().
+	dopts               dialOptions       // Default and user specified dial options.
+	channelz            *channelz.Channel // Channelz object.
+	resolverBuilder     resolver.Builder  // See initParsedTargetAndResolverBuilder().
+	idlenessMgr         *idle.Manager
+	metricsRecorderList *stats.MetricsRecorderList
 
 	// The following provide their own synchronization, and therefore don't
 	// require cc.mu to be held to access them.
@@ -627,11 +632,6 @@ type ClientConn struct {
 
 // WaitForStateChange waits until the connectivity.State of ClientConn changes from sourceState or
 // ctx expires. A true value is returned in former case and false in latter.
-//
-// # Experimental
-//
-// Notice: This API is EXPERIMENTAL and may be changed or removed in a
-// later release.
 func (cc *ClientConn) WaitForStateChange(ctx context.Context, sourceState connectivity.State) bool {
 	ch := cc.csMgr.getNotifyChan()
 	if cc.csMgr.getState() != sourceState {
@@ -646,11 +646,6 @@ func (cc *ClientConn) WaitForStateChange(ctx context.Context, sourceState connec
 }
 
 // GetState returns the connectivity.State of ClientConn.
-//
-// # Experimental
-//
-// Notice: This API is EXPERIMENTAL and may be changed or removed in a later
-// release.
 func (cc *ClientConn) GetState() connectivity.State {
 	return cc.csMgr.getState()
 }
@@ -830,14 +825,14 @@ func (cc *ClientConn) newAddrConnLocked(addrs []resolver.Address, opts balancer.
 	}
 
 	ac := &addrConn{
-		state:        connectivity.Idle,
-		cc:           cc,
-		addrs:        copyAddresses(addrs),
-		scopts:       opts,
-		dopts:        cc.dopts,
-		channelz:     channelz.RegisterSubChannel(cc.channelz, ""),
-		resetBackoff: make(chan struct{}),
-		stateChan:    make(chan struct{}),
+		state:          connectivity.Idle,
+		cc:             cc,
+		addrs:          copyAddresses(addrs),
+		scopts:         opts,
+		dopts:          cc.dopts,
+		channelz:       channelz.RegisterSubChannel(cc.channelz, ""),
+		resetBackoff:   make(chan struct{}),
+		stateReadyChan: make(chan struct{}),
 	}
 	ac.ctx, ac.cancel = context.WithCancel(cc.ctx)
 	// Start with our address set to the first address; this may be updated if
@@ -1184,8 +1179,8 @@ type addrConn struct {
 	addrs   []resolver.Address // All addresses that the resolver resolved to.
 
 	// Use updateConnectivityState for updating addrConn's connectivity state.
-	state     connectivity.State
-	stateChan chan struct{} // closed and recreated on every state change.
+	state          connectivity.State
+	stateReadyChan chan struct{} // closed and recreated on every READY state change.
 
 	backoffIdx   int // Needs to be stateful for resetConnectBackoff.
 	resetBackoff chan struct{}
@@ -1198,9 +1193,6 @@ func (ac *addrConn) updateConnectivityState(s connectivity.State, lastErr error)
 	if ac.state == s {
 		return
 	}
-	// When changing states, reset the state change channel.
-	close(ac.stateChan)
-	ac.stateChan = make(chan struct{})
 	ac.state = s
 	ac.channelz.ChannelMetrics.State.Store(&s)
 	if lastErr == nil {
@@ -1518,7 +1510,7 @@ func (ac *addrConn) getReadyTransport() transport.ClientTransport {
 func (ac *addrConn) getTransport(ctx context.Context) (transport.ClientTransport, error) {
 	for ctx.Err() == nil {
 		ac.mu.Lock()
-		t, state, sc := ac.transport, ac.state, ac.stateChan
+		t, state, sc := ac.transport, ac.state, ac.stateReadyChan
 		ac.mu.Unlock()
 		if state == connectivity.Ready {
 			return t, nil
@@ -1581,7 +1573,7 @@ func (ac *addrConn) tearDown(err error) {
 		} else {
 			// Hard close the transport when the channel is entering idle or is
 			// being shutdown. In the case where the channel is being shutdown,
-			// closing of transports is also taken care of by cancelation of cc.ctx.
+			// closing of transports is also taken care of by cancellation of cc.ctx.
 			// But in the case where the channel is entering idle, we need to
 			// explicitly close the transports here. Instead of distinguishing
 			// between these two cases, it is simpler to close the transport
