@@ -26,12 +26,16 @@ import (
 	"math"
 	"reflect"
 	"testing"
+	"time"
 
+	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/encoding"
 	protoenc "google.golang.org/grpc/encoding/proto"
 	"google.golang.org/grpc/internal/testutils"
 	"google.golang.org/grpc/internal/transport"
 	"google.golang.org/grpc/mem"
+	"google.golang.org/grpc/stats"
 	"google.golang.org/grpc/status"
 	perfpb "google.golang.org/grpc/test/codec_perf"
 	"google.golang.org/protobuf/proto"
@@ -332,11 +336,231 @@ func TestCheckReceiveMessageOverflow(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			err := checkReceiveMessageOverflow(tt.readBytes, tt.maxReceiveMessageSize, tt.dcReader)
 			if (err != nil) != (tt.wantErr != nil) {
-				t.Errorf("unexpected error state: got err=%v, want err=%v", err, tt.wantErr)
+				t.Errorf("unexpected error state: want err=%v, got err=%v", tt.wantErr, err)
 			} else if err != nil && err.Error() != tt.wantErr.Error() {
-				t.Errorf("unexpected error message: got err=%v, want err=%v", err, tt.wantErr)
+				t.Errorf("unexpected error message: want err=%v, got err=%v", tt.wantErr, err)
 			}
 
 		})
 	}
+}
+
+// // GzipCompressor implements encoding.Compressor for gzip compression.
+// type GzipCompressor struct{}
+
+// func (c *GzipCompressor) Compress(w io.Writer) (io.WriteCloser, error) {
+// 	return gzip.NewWriter(w), nil
+// }
+
+// func (c *GzipCompressor) Decompress(r io.Reader) (io.Reader, error) {
+// 	return gzip.NewReader(r)
+// }
+
+// // TestDecompressReader tests the specific line: dcReader, err := compressor.Decompress(d.Reader()).
+// func TestDecompressReader(t *testing.T) {
+// 	compressor := &GzipCompressor{}
+// 	message := "hello world"
+
+// 	// Step 1: Compress the message to simulate valid compressed data
+// 	var compressedDataBuffer bytes.Buffer
+// 	writer := gzip.NewWriter(&compressedDataBuffer)
+// 	_, err := writer.Write([]byte(message))
+// 	if err != nil {
+// 		t.Fatalf("failed to compress data: %v", err)
+// 	}
+// 	writer.Close()
+
+// 	// Step 2: Convert []byte to *[]byte by taking the address of compressedDataBuffer.Bytes()
+// 	compressedBytes := compressedDataBuffer.Bytes()
+// 	compressedData := mem.NewBuffer(&compressedBytes, nil)
+// 	bufferSlice := mem.BufferSlice{compressedData}
+
+// 	// Step 3: Call compressor.Decompress with bufferSlice.Reader()
+// 	dcReader, err := compressor.Decompress(bufferSlice.Reader())
+// 	if err != nil {
+// 		t.Fatalf("compressor.Decompress failed: %v", err)
+// 	}
+
+// 	// Step 4: Validate that dcReader is correctly reading the decompressed data
+// 	var decompressedData bytes.Buffer
+// 	_, err = io.Copy(&decompressedData, dcReader)
+// 	if err != nil {
+// 		t.Fatalf("failed to read from dcReader: %v", err)
+// 	}
+
+// 	// Step 5: Compare the decompressed data to the original message
+// 	if decompressedData.String() != message {
+// 		t.Errorf("expected decompressed data to be %q, but got %q", message, decompressedData.String())
+// 	}
+// }
+
+// // TestDecompressReaderError tests the error case where the data is not valid compressed data.
+// func TestDecompressReaderError(t *testing.T) {
+// 	compressor := &GzipCompressor{}
+// 	invalidData := []byte("invalid compressed data")
+
+// 	// Step 1: Create a mem.BufferSlice from invalid data
+// 	invalidBuffer := mem.NewBuffer(&invalidData, nil)
+// 	invalidBufferSlice := mem.BufferSlice{invalidBuffer}
+
+// 	// Step 2: Attempt to decompress invalid data
+// 	_, err := compressor.Decompress(invalidBufferSlice.Reader())
+
+// 	// Step 3: Validate that an error occurred
+// 	if err == nil {
+// 		t.Fatal("expected an error due to invalid compressed data, but got none")
+// 	}
+// }
+
+func TestOutPayload(t *testing.T) {
+	// Test data
+	client := true
+	msg := "test message"
+	dataLength := 100
+	payloadLength := 150
+	headerLen := 5 // Assuming this is the constant value used in the function
+	timestamp := time.Now()
+
+	// Expected output
+	expected := &stats.OutPayload{
+		Client:           client,
+		Payload:          msg,
+		Length:           dataLength,
+		WireLength:       payloadLength + headerLen,
+		CompressedLength: payloadLength,
+		SentTime:         timestamp,
+	}
+
+	// Call the function
+	result := outPayload(client, msg, dataLength, payloadLength, timestamp)
+
+	// Validate the result using assertions
+	assert.Equal(t, expected.Client, result.Client, "Client mismatch")
+	assert.Equal(t, expected.Payload, result.Payload, "Payload mismatch")
+	assert.Equal(t, expected.Length, result.Length, "Length mismatch")
+	assert.Equal(t, expected.WireLength, result.WireLength, "WireLength mismatch")
+	assert.Equal(t, expected.CompressedLength, result.CompressedLength, "CompressedLength mismatch")
+	assert.Equal(t, expected.SentTime, result.SentTime, "SentTime mismatch")
+}
+
+func TestCheckRecvPayload(t *testing.T) {
+	// Define constants used in tests
+	compressionNone := payloadFormat(0)
+	compressionMade := payloadFormat(1)
+
+	tests := []struct {
+		name           string
+		pf             payloadFormat
+		recvCompress   string
+		haveCompressor bool
+		isServer       bool
+		expectedCode   codes.Code
+		expectedMsg    string
+	}{
+		{
+			name:           "No compression (compressionNone)",
+			pf:             compressionNone,
+			recvCompress:   "",
+			haveCompressor: false,
+			isServer:       false,
+			expectedCode:   codes.OK,
+		},
+		{
+			name:           "Compressed flag with empty encoding (compressionMade)",
+			pf:             compressionMade,
+			recvCompress:   "",
+			haveCompressor: false,
+			isServer:       false,
+			expectedCode:   codes.Internal,
+			expectedMsg:    "grpc: compressed flag set with identity or empty encoding",
+		},
+		{
+			name:           "Compressed flag with identity encoding (compressionMade)",
+			pf:             compressionMade,
+			recvCompress:   encoding.Identity,
+			haveCompressor: false,
+			isServer:       false,
+			expectedCode:   codes.Internal,
+			expectedMsg:    "grpc: compressed flag set with identity or empty encoding",
+		},
+		{
+			name:           "Compressor not installed (client)",
+			pf:             compressionMade,
+			recvCompress:   "gzip",
+			haveCompressor: false,
+			isServer:       false,
+			expectedCode:   codes.Internal,
+			expectedMsg:    "grpc: Decompressor is not installed for grpc-encoding \"gzip\"",
+		},
+		{
+			name:           "Compressor not installed (server)",
+			pf:             compressionMade,
+			recvCompress:   "gzip",
+			haveCompressor: false,
+			isServer:       true,
+			expectedCode:   codes.Unimplemented,
+			expectedMsg:    "grpc: Decompressor is not installed for grpc-encoding \"gzip\"",
+		},
+		{
+			name:           "Unexpected payload format",
+			pf:             payloadFormat(2),
+			recvCompress:   "",
+			haveCompressor: false,
+			isServer:       false,
+			expectedCode:   codes.Internal,
+			expectedMsg:    "grpc: received unexpected payload format 2",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Call the function
+			result := checkRecvPayload(tt.pf, tt.recvCompress, tt.haveCompressor, tt.isServer)
+
+			// Check if result is nil for OK status
+			if tt.expectedCode == codes.OK {
+				assert.Nil(t, result)
+			} else {
+				// Validate non-nil status and its code/message
+				assert.NotNil(t, result)
+				assert.Equal(t, tt.expectedCode, result.Code(), "Unexpected status code")
+				assert.Contains(t, result.Message(), tt.expectedMsg, "Unexpected status message")
+			}
+		})
+	}
+}
+
+// Dummy decompressor function (replace with the actual decompressor from your code)
+func Decompress(r io.Reader) (io.Reader, error) {
+	return gzip.NewReader(r)
+}
+
+func TestDecompressWithMemBufferSlice(t *testing.T) {
+	// Step 1: Create a buffer with compressed data
+	var compressedData bytes.Buffer
+	w := gzip.NewWriter(&compressedData)
+	_, err := w.Write([]byte("test data"))
+	assert.NoError(t, err)
+	w.Close()
+	// var compressedDataBuffer bytes.Buffer
+	// Step 2: Create mem.BufferSlice using the compressed data
+	//  data := compressedData.Bytes()
+	// compressedBytes := compressedData.Bytes()
+	var bufferSlice mem.BufferSlice
+	// bufferSlice = mem.BufferSlice{
+	// 	Buffers:[]byte{compressedBytes}, // Create BufferSlice from compressed data
+	// }
+
+	// Step 3: Call the Decompress method
+	dcReader, err := Decompress(bufferSlice.Reader())
+	assert.NoError(t, err)
+
+	// Step 4: Read and verify the decompressed data
+	var decompressedData bytes.Buffer
+	_, err = io.Copy(&decompressedData, dcReader)
+	assert.NoError(t, err)
+
+	// Step 5: Compare the decompressed output with the expected result
+	expected := "test data"
+	assert.Equal(t, expected, decompressedData.String())
 }

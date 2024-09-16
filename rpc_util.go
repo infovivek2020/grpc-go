@@ -874,23 +874,8 @@ func recvAndDecompress(p *parser, s *transport.Stream, dc Decompressor, maxRecei
 
 // Using compressor, decompress d, returning data and size.
 // Optionally, if data will be over maxReceiveMessageSize, just return the size.
-// func decompress(compressor encoding.Compressor, d mem.BufferSlice, maxReceiveMessageSize int, pool mem.BufferPool) (mem.BufferSlice, int, error) {
-// 	dcReader, err := compressor.Decompress(d.Reader())
-// 	if err != nil {
-// 		return nil, 0, err
-// 	}
-
-//		var out mem.BufferSlice
-//		_, err = io.Copy(mem.NewWriter(&out, pool), io.LimitReader(dcReader, int64(maxReceiveMessageSize)+1))
-//		if err != nil {
-//			out.Free()
-//			return nil, 0, err
-//		}
-//		return out, out.Len(), nil
-//	}
 func decompress(compressor encoding.Compressor, d mem.BufferSlice, maxReceiveMessageSize int, pool mem.BufferPool) (mem.BufferSlice, int, error) {
 	dcReader, err := compressor.Decompress(d.Reader())
-	// dcReader, err := compressor.Decompress(bytes.NewReader(d))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -913,23 +898,22 @@ func decompress(compressor encoding.Compressor, d mem.BufferSlice, maxReceiveMes
 			if err = checkReceiveMessageOverflow(bytesRead, int64(maxReceiveMessageSize), dcReader); err != nil {
 				return nil, size + 1, err
 			}
-			//	bytesRead, err := buf.ReadFrom(io.LimitReader(dcReader, int64(maxReceiveMessageSize)+1))
-			return nil, int(bytesRead), err
+			byteSlice := buf.Bytes()
+			bufferSlice := mem.NewBuffer(&byteSlice, pool)
+			d = mem.BufferSlice{bufferSlice}
+			return d, int(bytesRead), err
 		}
 	}
-	// d, err = io.ReadAll(io.LimitReader(dcReader, int64(maxReceiveMessageSize)))
-	// if err != nil {
-	// 	return nil, len(d), err
-	// }
-	_, err = io.Copy(mem.NewWriter(&d, pool), io.LimitReader(dcReader, int64(maxReceiveMessageSize)+1))
-	if err != nil {
-		d.Free()
-		return nil, 0, err
+	s, err := io.ReadAll(io.LimitReader(dcReader, int64(maxReceiveMessageSize)))
+	buffer := mem.NewBuffer(&s, pool)
+	bufferSlice := mem.BufferSlice{buffer}
+	if s != nil {
+		return nil, len(d), err
 	}
 	if err = checkReceiveMessageOverflow(int64(len(d)), int64(maxReceiveMessageSize), dcReader); err != nil {
 		return nil, len(d) + 1, err
 	}
-	return d, len(d), err
+	return bufferSlice, len(bufferSlice), err
 }
 
 // For the two compressor parameters, both should not be set, but if they are,
