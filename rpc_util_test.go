@@ -345,73 +345,6 @@ func TestCheckReceiveMessageOverflow(t *testing.T) {
 	}
 }
 
-// // GzipCompressor implements encoding.Compressor for gzip compression.
-// type GzipCompressor struct{}
-
-// func (c *GzipCompressor) Compress(w io.Writer) (io.WriteCloser, error) {
-// 	return gzip.NewWriter(w), nil
-// }
-
-// func (c *GzipCompressor) Decompress(r io.Reader) (io.Reader, error) {
-// 	return gzip.NewReader(r)
-// }
-
-// // TestDecompressReader tests the specific line: dcReader, err := compressor.Decompress(d.Reader()).
-// func TestDecompressReader(t *testing.T) {
-// 	compressor := &GzipCompressor{}
-// 	message := "hello world"
-
-// 	// Step 1: Compress the message to simulate valid compressed data
-// 	var compressedDataBuffer bytes.Buffer
-// 	writer := gzip.NewWriter(&compressedDataBuffer)
-// 	_, err := writer.Write([]byte(message))
-// 	if err != nil {
-// 		t.Fatalf("failed to compress data: %v", err)
-// 	}
-// 	writer.Close()
-
-// 	// Step 2: Convert []byte to *[]byte by taking the address of compressedDataBuffer.Bytes()
-// 	compressedBytes := compressedDataBuffer.Bytes()
-// 	compressedData := mem.NewBuffer(&compressedBytes, nil)
-// 	bufferSlice := mem.BufferSlice{compressedData}
-
-// 	// Step 3: Call compressor.Decompress with bufferSlice.Reader()
-// 	dcReader, err := compressor.Decompress(bufferSlice.Reader())
-// 	if err != nil {
-// 		t.Fatalf("compressor.Decompress failed: %v", err)
-// 	}
-
-// 	// Step 4: Validate that dcReader is correctly reading the decompressed data
-// 	var decompressedData bytes.Buffer
-// 	_, err = io.Copy(&decompressedData, dcReader)
-// 	if err != nil {
-// 		t.Fatalf("failed to read from dcReader: %v", err)
-// 	}
-
-// 	// Step 5: Compare the decompressed data to the original message
-// 	if decompressedData.String() != message {
-// 		t.Errorf("expected decompressed data to be %q, but got %q", message, decompressedData.String())
-// 	}
-// }
-
-// // TestDecompressReaderError tests the error case where the data is not valid compressed data.
-// func TestDecompressReaderError(t *testing.T) {
-// 	compressor := &GzipCompressor{}
-// 	invalidData := []byte("invalid compressed data")
-
-// 	// Step 1: Create a mem.BufferSlice from invalid data
-// 	invalidBuffer := mem.NewBuffer(&invalidData, nil)
-// 	invalidBufferSlice := mem.BufferSlice{invalidBuffer}
-
-// 	// Step 2: Attempt to decompress invalid data
-// 	_, err := compressor.Decompress(invalidBufferSlice.Reader())
-
-// 	// Step 3: Validate that an error occurred
-// 	if err == nil {
-// 		t.Fatal("expected an error due to invalid compressed data, but got none")
-// 	}
-// }
-
 func TestOutPayload(t *testing.T) {
 	// Test data
 	client := true
@@ -528,39 +461,4 @@ func TestCheckRecvPayload(t *testing.T) {
 			}
 		})
 	}
-}
-
-// Dummy decompressor function (replace with the actual decompressor from your code)
-func Decompress(r io.Reader) (io.Reader, error) {
-	return gzip.NewReader(r)
-}
-
-func TestDecompressWithMemBufferSlice(t *testing.T) {
-	// Step 1: Create a buffer with compressed data
-	var compressedData bytes.Buffer
-	w := gzip.NewWriter(&compressedData)
-	_, err := w.Write([]byte("test data"))
-	assert.NoError(t, err)
-	w.Close()
-	// var compressedDataBuffer bytes.Buffer
-	// Step 2: Create mem.BufferSlice using the compressed data
-	//  data := compressedData.Bytes()
-	// compressedBytes := compressedData.Bytes()
-	var bufferSlice mem.BufferSlice
-	// bufferSlice = mem.BufferSlice{
-	// 	Buffers:[]byte{compressedBytes}, // Create BufferSlice from compressed data
-	// }
-
-	// Step 3: Call the Decompress method
-	dcReader, err := Decompress(bufferSlice.Reader())
-	assert.NoError(t, err)
-
-	// Step 4: Read and verify the decompressed data
-	var decompressedData bytes.Buffer
-	_, err = io.Copy(&decompressedData, dcReader)
-	assert.NoError(t, err)
-
-	// Step 5: Compare the decompressed output with the expected result
-	expected := "test data"
-	assert.Equal(t, expected, decompressedData.String())
 }
