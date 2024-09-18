@@ -21,12 +21,15 @@ package grpc
 import (
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"io"
 	"math"
 	"reflect"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/encoding"
 	protoenc "google.golang.org/grpc/encoding/proto"
 	"google.golang.org/grpc/internal/testutils"
 	"google.golang.org/grpc/internal/transport"
@@ -289,4 +292,107 @@ func BenchmarkGZIPCompressor512KiB(b *testing.B) {
 
 func BenchmarkGZIPCompressor1MiB(b *testing.B) {
 	bmCompressor(b, 1024*1024, NewGZIPCompressor())
+}
+
+type MockCompressor struct {
+	DecompressedData []byte
+	ErrDecompress    error
+	Size             int
+}
+
+func (m *MockCompressor) Compress(w io.Writer) (io.WriteCloser, error) {
+	return nil, nil
+}
+
+func (m *MockCompressor) Decompress(r io.Reader) (io.Reader, error) {
+	if m.ErrDecompress != nil {
+		return nil, m.ErrDecompress
+	}
+	return bytes.NewReader(m.DecompressedData), nil
+}
+
+func (m *MockCompressor) DecompressedSize(compressedBytes mem.BufferSlice) int {
+	return m.Size
+}
+
+func (m *MockCompressor) Name() string {
+	return "mockCompressor"
+}
+
+func TestDecompress(t *testing.T) {
+	tests := []struct {
+		name                  string
+		compressor            encoding.Compressor
+		input                 mem.BufferSlice
+		maxReceiveMessageSize int
+		wantedOutput          mem.BufferSlice
+		wantedSize            int
+		wantedError           error
+	}{
+		{
+			name: "Successful decompression",
+			compressor: &MockCompressor{
+				DecompressedData: []byte("decompressed data"),
+				Size:             17,
+			},
+			input:                 mem.BufferSlice{}, // You can fill in the actual input here
+			maxReceiveMessageSize: 100,
+			wantedOutput: func() mem.BufferSlice {
+				decompressed := []byte("decompressed data")
+				return mem.BufferSlice{mem.NewBuffer(&decompressed, nil)} // Taking the address of the slice variable
+			}(),
+			wantedSize:  17,
+			wantedError: nil,
+		},
+		{
+			name: "Decompressed size exceeds maxReceiveMessageSize",
+			compressor: &MockCompressor{
+				DecompressedData: []byte("decompressed data"),
+				Size:             150,
+			},
+			input:                 mem.BufferSlice{},
+			maxReceiveMessageSize: 100,
+			wantedOutput:          nil,
+			wantedSize:            150,
+			wantedError:           errors.New("message size exceeds maxReceiveMessageSize allowed"),
+		},
+		{
+			name: "Error during decompression",
+			compressor: &MockCompressor{
+				ErrDecompress: errors.New("decompression error"),
+			},
+			input:                 mem.BufferSlice{},
+			maxReceiveMessageSize: 100,
+			wantedOutput:          nil,
+			wantedSize:            0,
+			wantedError:           errors.New("decompression error"),
+		},
+		{
+			name: "Buffer overflow",
+			compressor: &MockCompressor{
+				DecompressedData: []byte("overflow data"),
+				Size:             100,
+			},
+			input:                 mem.BufferSlice{},
+			maxReceiveMessageSize: 5, // Intentionally low to trigger overflow
+			wantedOutput:          nil,
+			wantedSize:            100,
+			wantedError:           errors.New("message size exceeds maxReceiveMessageSize allowed"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			output, size, err := decompress(tt.compressor, tt.input, tt.maxReceiveMessageSize, nil)
+
+			if tt.wantedError != nil {
+				require.EqualError(t, err, tt.wantedError.Error())
+			} else {
+				require.NoError(t, err)
+			}
+
+			require.Equal(t, tt.wantedSize, size)
+			require.Equal(t, tt.wantedOutput, output)
+		})
+	}
 }
